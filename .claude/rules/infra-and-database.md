@@ -14,6 +14,8 @@ Source: `docs/conventions/architecture.md#database--postgres-rpc-rule` · `docs/
 
 - `infra/` is the only layer that imports the db client. It implements the ports in `application/ports.ts`.
 - No business rules and no user-input validation in infra. Its job is persistence and mapping.
+- No permission checks in repositories. Scope queries by `tenantId` (RLS is the safety net); the use case decides who may do what.
+- A repository **writes** only its own module's tables. It may **read** other modules' tables (joins for read models), since the schema is shared in `lib/db/`. Writes to another module's data go through that module's `index.ts`.
 - Mappers (`toDomain(row)`, `toRow(entity)`) are the only code that knows both `OrderRow` and `Order`. Don't `as`-cast a row into a domain type.
 - One Drizzle schema in `lib/db/schema.ts` (or `lib/db/schema/<group>.ts`). A module that owns its tables outright may keep `infra/schema.ts` and re-export it from `lib/db/schema.ts`.
 

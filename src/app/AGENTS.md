@@ -20,6 +20,17 @@ export default async function OrderPage({ params }: PageProps<"/orders/[orderId]
 }
 ```
 
+## Errors and permissions
+
+| Case | In a page / RSC |
+| --- | --- |
+| `NotFound` | `notFound()` → `not-found.tsx` (usually thrown by the module's query) |
+| `Forbidden` | `forbidden()` if `experimental.authInterrupts` is on; otherwise redirect to sign-in (no session) or render an inline "no access" state |
+| Tagged domain error | render inline, through the module's `_tag` → copy map |
+| Unexpected | let it throw → `error.tsx` |
+
+Pages never compute permissions. They pass the `can.*` flags returned by the module's query on to components.
+
 ## Where UI goes
 
 - One route uses it → `app/.../_components/<noun>-<role>.tsx`.
@@ -28,7 +39,7 @@ export default async function OrderPage({ params }: PageProps<"/orders/[orderId]
 
 ## api/
 
-Webhooks and route handlers only. Verify the signature, then hand the raw payload to a function exported by the module. That function validates the payload with its zod schema.
+Webhooks and route handlers only. Verify the signature, then hand the raw payload to a function exported by the module. That function validates the payload with its zod schema. Route handlers can't use `updateTag`: revalidate with `revalidateTag(tag, "max")` through a helper the module exports.
 
 ## Naming
 

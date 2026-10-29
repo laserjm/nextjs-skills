@@ -21,9 +21,10 @@ const elements = [
   mod("application", "application"),
   mod("infra", "infra"),
   mod("components", "components"),
-  mod("module-root"), // actions.ts, queries.ts, contracts.ts, index.ts (see files below)
+  mod("module-root"), // actions.ts, queries.ts, subscribers.ts, contracts.ts, index.ts (see files below)
   { type: "app", pattern: "src/app", partialMatch: false },
   { type: "lib", pattern: "src/lib", partialMatch: false },
+  { type: "server", pattern: "src/server", partialMatch: false },
   { type: "ui-kit", pattern: "src/components/ui", partialMatch: false },
   { type: "test-support", pattern: "test", partialMatch: false },
 ];
@@ -33,6 +34,7 @@ const files = [
   { category: "test", pattern: "**/*.test.{ts,tsx}" },
   { category: "actions", pattern: "src/modules/*/actions.ts" },
   { category: "queries", pattern: "src/modules/*/queries.ts" },
+  { category: "subscribers", pattern: "src/modules/*/subscribers.ts" },
   { category: "contracts", pattern: "src/modules/*/contracts.ts" },
   { category: "index", pattern: "src/modules/*/index.ts" },
   { category: "result", pattern: "src/lib/result.ts" },
@@ -52,8 +54,8 @@ const moduleApi = (x) => rootFile("index", x);
 const result = { file: { categories: "result" } };
 const lib = el("lib");
 const uiKit = el("ui-kit");
-// The ui layer: actions.ts, queries.ts, components/ (the "controller" in DDD terms).
-const uiLayer = (x) => [el("components", x), rootFile(["actions", "queries"], x)];
+// The ui layer: actions.ts, queries.ts, subscribers.ts, components/ (the "controller" in DDD terms).
+const uiLayer = (x) => [el("components", x), rootFile(["actions", "queries", "subscribers"], x)];
 
 const policies = [
   {
@@ -67,9 +69,9 @@ const policies = [
     allow: { to: [domain(sameModule), application(sameModule), result, moduleApi(otherModule)] },
   },
   {
-    // ...input types come from contracts.ts, type-only.
+    // ...input types from contracts.ts and Requester from lib/auth: type-only.
     from: application(),
-    allow: { to: contracts(sameModule), dependency: { kind: "type" } },
+    allow: { to: [contracts(sameModule), lib], dependency: { kind: "type" } },
   },
   {
     // infra: implements ports, the only layer that talks to the db.
@@ -106,6 +108,16 @@ const policies = [
     from: el("app"),
     allow: { to: [el("app"), moduleApi(), uiKit, lib] },
   },
+  {
+    // Actions dispatch domain events after commit through the composition root.
+    from: rootFile("actions"),
+    allow: { to: el("server") },
+  },
+  {
+    // Composition root: wires modules' public APIs together, nothing deeper.
+    from: el("server"),
+    allow: { to: [moduleApi(), lib] },
+  },
   { from: lib, allow: { to: lib } },
   { from: uiKit, allow: { to: [uiKit, lib] } },
   {
@@ -128,6 +140,14 @@ const NO_IO = [
   [["next", "next/*"], "No Next.js APIs (cookies, headers, revalidate*) here. That belongs to the ui layer."],
   [["react", "react-dom"], "No React here."],
 ];
+
+// ─── Caching (docs/conventions/architecture.md#caching--revalidation) ──────
+// Uses core no-restricted-imports so it never collides with the per-layer
+// @typescript-eslint/no-restricted-imports blocks below.
+
+const CACHE_APIS = ["unstable_cache", "cacheTag", "cacheLife"];
+const REVALIDATE_APIS = ["revalidateTag", "revalidatePath", "updateTag", "refresh"];
+const nextCache = (importNames, message) => ["error", { paths: [{ name: "next/cache", importNames, message }] }];
 
 // ─── Naming (docs/conventions/naming.md) ────────────────────────────────────
 
@@ -166,6 +186,10 @@ const NO_RPC = {
   selector: "CallExpression[callee.property.name='rpc']",
   message: "Postgres RPC only inside an infra/ repository, and only if it meets the exception criteria in docs/conventions/architecture.md.",
 };
+const NO_USE_CACHE = {
+  selector: "ExpressionStatement[directive=/^use cache/]",
+  message: "\"use cache\" only in queries.ts. See docs/conventions/architecture.md#caching--revalidation.",
+};
 const NO_THROW = { selector: "ThrowStatement", message: "Return err({ _tag: ... }) instead of throwing. Throwing is for bugs." };
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -198,7 +222,11 @@ export default [
     plugins: { "@typescript-eslint": tseslint.plugin, "check-file": checkFile },
     rules: {
       "@typescript-eslint/naming-convention": naming,
-      "no-restricted-syntax": ["error", NO_ENUM, NO_RPC],
+      "no-restricted-syntax": ["error", NO_ENUM, NO_RPC, NO_USE_CACHE],
+      "no-restricted-imports": nextCache(
+        [...CACHE_APIS, ...REVALIDATE_APIS],
+        "Caching lives in queries.ts and revalidation in actions.ts. Other modules call the exported revalidate<Noun>() helper.",
+      ),
       "check-file/filename-naming-convention": [
         "error",
         { "src/**/*.{ts,tsx}": "KEBAB_CASE" },
@@ -225,6 +253,7 @@ export default [
         "error",
         NO_ENUM,
         NO_RPC,
+        NO_USE_CACHE,
         NO_THROW,
         { selector: "ClassDeclaration", message: "Domain is plain types + pure functions, not classes." },
       ],
@@ -238,13 +267,26 @@ export default [
         ...NO_IO,
         [["zod"], "Validation happens once at the edge. Import inferred types with `import type`."],
       ]),
-      "no-restricted-syntax": ["error", NO_ENUM, NO_RPC, NO_THROW],
+      "no-restricted-syntax": ["error", NO_ENUM, NO_RPC, NO_USE_CACHE, NO_THROW],
     },
   },
   {
     files: ["src/modules/*/infra/**"],
     // The one place an RPC call may live.
-    rules: { "no-restricted-syntax": ["error", NO_ENUM] },
+    rules: { "no-restricted-syntax": ["error", NO_ENUM, NO_USE_CACHE] },
+  },
+  {
+    // queries.ts: the only place cache APIs and "use cache" appear; it also hosts revalidate<Noun>() helpers.
+    files: ["src/modules/*/queries.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", NO_ENUM, NO_RPC],
+      "no-restricted-imports": "off",
+    },
+  },
+  {
+    // actions.ts revalidates after ok, but never defines caches.
+    files: ["src/modules/*/actions.ts"],
+    rules: { "no-restricted-imports": nextCache(CACHE_APIS, "Cache definitions live in queries.ts.") },
   },
   {
     files: ["src/app/**"],

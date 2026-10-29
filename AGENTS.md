@@ -30,9 +30,11 @@ src/
     actions.ts         server actions      ┐
     queries.ts         cached RSC reads    ├ ui layer
     components/        feature UI          ┘
+    subscribers.ts     domain events this module handles, wired with deps
     contracts.ts       zod schemas + inferred Input/Dto types
     index.ts           the module's ONLY public API
-  lib/                 db, result, safe-action, env. Never imports modules     → src/lib/AGENTS.md
+  lib/                 db, result, safe-action, env, events. Never imports modules → src/lib/AGENTS.md
+  server/              composition root: event subscriptions                  → src/server/AGENTS.md
   components/ui/       shadcn primitives, never feature-aware
 ```
 
@@ -41,9 +43,13 @@ src/
 - Imports point down: `app → module index → ui layer → application → domain`; `infra` implements `application` ports. Other modules are imported only via `@/modules/<name>`. ESLint enforces this. Fix the import, never disable the rule.
 - Use cases return `Result<T, E>` from `@/lib/result` and never throw. Throwing is for bugs.
 - Validate once at the edge (action input, webhook payload, env) with the module's zod schema. Inside the module, trust the types.
-- Server actions go through `@/lib/safe-action` and `switch` exhaustively on `error._tag`.
+- Server actions go through `@/lib/safe-action` and return the use case's `Result`. Expected errors are values; only unexpected errors throw.
 - No `as` casts across layers. If types don't line up, write a mapper in `infra/`.
 - No new Postgres RPC, trigger logic or SQL functions. The narrow exception (all 4 criteria) is in `docs/conventions/architecture.md#database--postgres-rpc-rule`. Ask before adding one.
+- Authorization is decided in the use case: `Requester` comes in `Deps`, and the use case returns `err({ _tag: "Forbidden" })`. In anemic modules the action checks it. RLS only isolates tenants. Components get `can.*` booleans and never decide permissions.
+- Cache APIs (`"use cache"`, `cacheTag`) appear only in `queries.ts`, with tag constants defined there. Cached functions never read the request; pass `tenantId` as an argument. Only actions revalidate (`updateTag`), after `ok`, through the tag constants or another module's `revalidate<Noun>()`.
+- Modules talk through `index.ts` (when they need an answer) or domain events dispatched after commit (when they only inform). Handlers live in the receiving module and are registered in `src/server/event-subscriptions.ts`. Reading another module's tables is fine for read models; writes go through the owning module.
+- Errors: validation → `validationErrors` on fields. Expected errors (`NotFound`, `Forbidden`, domain) → returned as `data`, and the client maps `_tag` to copy with one exhaustive map. Unexpected → thrown → generic `serverError` / `error.tsx`. Pages call `notFound()` / `forbidden()`. A raw `_tag` never reaches the UI.
 - New modules start flat (`contracts.ts`, `queries.ts`, `actions.ts`, `index.ts`). Extract `application/` + `domain/` the moment an action contains an `if` about business state or two actions share a calculation. Use the `new-module` skill.
 
 ## Naming essentials
@@ -66,7 +72,7 @@ Claude Code loads these automatically by path. Other agents: open the matching f
 | `src/modules/*/domain/**` | `.claude/rules/domain.md` |
 | `src/modules/*/application/**` | `.claude/rules/application.md` |
 | `src/modules/*/infra/**`, `src/lib/db/**`, `drizzle/**` | `.claude/rules/infra-and-database.md` |
-| `src/modules/*/{actions,queries}.ts`, `components/**`, `_components/**` | `.claude/rules/ui-layer.md` |
+| `src/modules/*/{actions,queries,subscribers}.ts`, `components/**`, `_components/**` | `.claude/rules/ui-layer.md` |
 | `src/modules/*/contracts.ts` | `.claude/rules/contracts.md` |
 | `**/*.test.ts`, `e2e/**`, `test/**`, `**/__fakes__/**` | `.claude/rules/tests.md` |
 

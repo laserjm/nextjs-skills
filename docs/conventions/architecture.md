@@ -38,6 +38,7 @@ src/
       actions.ts                # server actions ("use server")  ─┐
       queries.ts                # cached reads for RSC            ├ ui layer
       components/               # feature UI (option B, see below) ─┘
+      subscribers.ts            # domain events this module handles, wired with deps
       contracts.ts              # zod input/output contracts + DTO types
       index.ts                  # the module's public API
     billing/
@@ -47,6 +48,9 @@ src/
     result.ts                   # Result<T, E>
     safe-action.ts              # next-safe-action client with auth middleware
     env.ts                      # validated env
+    events.ts                   # createEventBus, EventCollector (generic, no module imports)
+  server/
+    event-subscriptions.ts      # composition root: merges every module's subscribers
   components/ui/                # shadcn/ui primitives
 ```
 
@@ -87,9 +91,10 @@ Arrows show allowed imports. `infra/` is the only layer that imports a database 
 | `domain/` | types, branded value objects, invariant functions, tagged errors | nothing outside the module's `domain/` | I/O, Next, React, Drizzle, zod runtime calls |
 | `application/` (optional) | use cases, `ports.ts` interfaces | `domain/`, `lib/result` | DB client, `fetch`, `cookies()`, `revalidate*` |
 | `infra/` | repository implementations, API clients, mappers | `application/ports`, `domain/`, `lib/db` | business rules, validation of user input |
-| ui layer: `actions.ts`, `queries.ts`, `components/` ¹ | server actions, cached queries, feature components | `application/`, `contracts.ts`, `lib/safe-action`; `infra/` repos directly only when there is no use case to go through | business rules beyond calling a use case or a repo |
+| ui layer: `actions.ts`, `queries.ts`, `subscribers.ts`, `components/` ¹ | server actions, cached queries, event subscribers, feature components | `application/`, `contracts.ts`, `lib/safe-action`; `infra/` repos directly only when there is no use case to go through | business rules beyond calling a use case or a repo |
 | `app/` | pages, layouts, route handlers | `modules/*/index`, `components/ui` | direct DB calls, zod parsing, business rules |
-| `lib/` | cross-cutting: db client, Result, env, safe-action | nothing from `modules/` | anything feature-specific |
+| `lib/` | cross-cutting: db client, Result, env, safe-action, event bus | nothing from `modules/` | anything feature-specific |
+| `server/` | composition root (event subscriptions) | `modules/*/index`, `lib/` | logic of its own |
 
 **Hard rules:**
 
@@ -98,6 +103,12 @@ Arrows show allowed imports. `infra/` is the only layer that imports a database 
 - Errors cross layer boundaries as values (`Result`), never as thrown exceptions. Throwing is reserved for bugs.
 - Enforce the direction with `eslint-plugin-boundaries` (or `dependency-cruiser`) in CI from day one. A rule nobody checks is a suggestion.
 - If two modules import each other, merge them or extract a third. Cyclic modules are a boundary mistake.
+
+**Authorization.** Authentication (who is this?) happens once, in the `safe-action` middleware and in `queries.ts`, producing a `Requester` (`{ userId, tenantId, roles }`). Authorization (may they do this?) is a business decision and lives in the use case: `Requester` is passed in `Deps`, and the use case returns `err({ _tag: 'Forbidden' })`. Rules:
+
+- RLS enforces tenant isolation only. It is a safety net, never the place a permission rule is written.
+- Components never decide permissions; they receive `can.editOrder` booleans computed server-side.
+- An action that skips the application layer (anemic module) checks `requester` in the action itself — the only business `if` allowed there.
 
 ¹ `actions.ts`, `queries.ts` and `components/` sit at the module root to save a folder level, but they are the **ui layer** in the layered/clean-architecture sense. In particular `page.tsx`, `actions.ts` and `queries.ts` play the role of the *controller* (or *interface adapter*) in most DDD books and docs: they translate HTTP/React into use-case calls and back. Keep that mapping in mind when reading outside material.
 
@@ -110,7 +121,7 @@ Every shape has exactly one source of truth; everything else is inferred. If you
 | Table rows | Drizzle schema | `InferSelectModel` / `InferInsertModel` in `infra/` |
 | Request/response DTOs | zod in `modules/<x>/contracts.ts` | `z.infer` in use cases, actions, forms |
 | Domain types | `domain/*.ts` (plain types + branded primitives) | mappers in `infra/` convert rows to these |
-| Use case outcome | `Result<T, DomainError>` from `lib/result.ts` | actions switch on `error._tag` |
+| Use case outcome | `Result<T, DomainError>` from `lib/result.ts` | returned by the action as `data`; the client maps `error._tag` |
 | Server action contract | `next-safe-action` wrapping the zod input | `useAction` / `useOptimisticAction` on the client |
 | Env vars | `lib/env.ts` (t3-env or zod) | `env.X`, fails at build if missing |
 | Routes | `typedRoutes: true` in `next.config` | `<Link href>` and `redirect()` |
@@ -118,11 +129,50 @@ Every shape has exactly one source of truth; everything else is inferred. If you
 **Rules:**
 
 - Never `as` cast across a layer boundary. If the types don't line up, add a mapper in `infra/` or fix the schema.
-- Use cases return `Result`, never throw. Actions translate `Result` into `{ data } | { serverError } | { validationErrors }`, which `next-safe-action` already types for the client.
+- Use cases return `Result`, never throw. Expected errors are return values all the way to the client: the action returns the `Result` as `data`, zod failures arrive as `validationErrors`, and only unexpected throws become a generic `serverError`. This follows the Next.js guidance: model expected errors as return values, throw only for the unexpected.
 - Validate at the edge once (server action input, webhook payload, env). Inside the module, trust the types.
-- Domain errors are a tagged union (`{ _tag: 'OrderAlreadyPaid' }`). Exhaustive `switch` in the action; the compiler catches a missing case.
+- Domain errors are a tagged union (`{ _tag: 'OrderAlreadyPaid' }`). Each `_tag` is mapped to user-facing copy in exactly one place, the client, with a `satisfies Record<PayOrderError['_tag'], string>` map; the compiler catches a missing case. Server code switches on `_tag` only where control flow differs (a page calling `notFound()`).
 - Forms use the same zod schema via `react-hook-form` + `zodResolver`. Client and server disagree on nothing.
 - Branded primitives for ids and money (`type OrderId = string & { __brand: 'OrderId' }`). It costs one line and stops `userId` landing in `orderId`.
+
+**Error → HTTP/UI mapping:**
+
+| Error | Where it comes from | Action result | Page / RSC |
+| --- | --- | --- | --- |
+| zod validation | safe-action input | `validationErrors`, field-level | — |
+| `NotFound` | application | `data: { ok: false, error: { _tag: 'NotFound' } }` | `notFound()` → 404 |
+| `Forbidden` | application / requester check | `data: { ok: false, error: { _tag: 'Forbidden' } }` | `forbidden()` or redirect to sign-in ² |
+| Domain error (tagged) | domain via `Result` | `data: { ok: false, error }`, shown as form-level message | render inline |
+| Unexpected throw | anything | generic `serverError`, logged with trace id | `error.tsx` → 500 |
+
+Rule: expected errors are values, not exceptions. The client maps `_tag` to user-facing copy with one exhaustive map per error union; the raw tag never appears in the UI. `serverError` only ever means "unexpected".
+
+² `forbidden()` and `unauthorized()` require `experimental.authInterrupts: true` in `next.config`. Without it, redirect to sign-in (no session) or render an inline "no access" state (signed in, not allowed).
+
+## Caching & revalidation
+
+- `queries.ts` is the only place `unstable_cache` / `"use cache"` / `cacheTag` appear. Tags are constants exported from that file: ``ORDER_TAGS = { all: 'orders', one: (id) => `order:${id}` }``.
+- Cached functions never read the request (`cookies()`, `headers()`, the session). The exported query authenticates first, then calls a private cached function with everything that varies the result, `tenantId` included, as arguments. Those arguments are the cache key; anything read inside the cached scope would be shared across users and tenants.
+- Granularity: one `all` tag per aggregate for lists, one `one(id)` tag for detail views. Nothing finer until a measured need.
+- Revalidation is the action's job, after the use case returns `ok`: `updateTag(ORDER_TAGS.one(id)); updateTag(ORDER_TAGS.all)`. `updateTag` gives read-your-own-writes and works only inside server actions; route handlers (webhooks) use `revalidateTag(tag, 'max')`. Use cases and repositories never import `revalidate*` / `updateTag`.
+- A cross-module write that affects another module's reads calls that module's exported `revalidate<Noun>(id)` helper from its `index.ts`, never its tag strings. The helper lives in `queries.ts` next to the tags.
+- `revalidatePath` only for routes without a natural aggregate (marketing pages).
+
+## Cross-module communication
+
+Two allowed mechanisms, picked by coupling:
+
+- **Direct call** through `index.ts` when module A needs B's *answer* now (billing asks catalog for a price). Synchronous, typed, inside the same transaction if needed.
+- **Domain event** when A only needs to *inform* B (order paid → billing issues invoice). The use case returns events in its `ok` payload or collects them via an `EventCollector` port; the action dispatches them after commit through `dispatchEvents` from `server/event-subscriptions.ts`. Handlers live in the receiving module: the logic in `modules/billing/application/on-order-paid.ts`, wired with its deps in `modules/billing/subscribers.ts`, which `index.ts` exports.
+
+Rules:
+
+- **Wiring:** `server/event-subscriptions.ts` is the composition root. It merges every module's subscribers into one bus built with `createEventBus` from `lib/events.ts`; `lib/` itself never imports modules. A module that starts handling an event registers its subscribers there.
+- **Delivery:** in-process, after commit. A failing handler is logged and does not roll back the emitter. If delivery must be guaranteed, introduce a transactional outbox; not before.
+- **Tables:** writes always go through the owning module's `index.ts`. Reading another module's tables directly is allowed for read models (a join in `queries.ts` or a repository), because the schema is shared in `lib/db/`.
+- Never: importing another module's `infra/` or `domain/` internals, or writing to its tables. Never a trigger as an event bus.
+- If A and B call each other, merge or extract a third module (see the hard rules under [Layer rules](#layer-rules)).
+- Start with direct calls; introduce events when a module gets its second subscriber or when the call would cross a transaction boundary.
 
 ## Database & Postgres RPC rule
 
@@ -161,7 +211,7 @@ A module gets a `domain/` layer only when it has invariants. Otherwise it is a C
 
 **Anemic module shape:** `contracts.ts` + `queries.ts` + `actions.ts` + `index.ts`. Actions and queries call Drizzle directly through a thin `infra/` repo or even inline. No `domain/`; the `application/` folder does not exist until promotion.
 
-**Promotion rule:** the moment an action contains an `if` about business state, or a second action needs the same calculation, extract a use case and a `domain/` file. Don't pre-build the layers; don't resist them either once the signal appears.
+**Promotion rule:** the moment an action contains an `if` about business state (a `requester` permission check doesn't count, see Authorization under [Layer rules](#layer-rules)), or a second action needs the same calculation, extract a use case and a `domain/` file. Don't pre-build the layers; don't resist them either once the signal appears.
 
 **What "rich" means here:** plain types and pure functions, not classes with methods. `applyPayment(order, payment): Result<Order, OrderError>` is a rich domain. It is serializable, testable with no setup, and works across the server/client boundary.
 
@@ -195,7 +245,7 @@ Copy into a PR template or `ARCHITECTURE.md`.
 - [ ] Each feature lives in `modules/<x>/` with a public `index.ts`; routes import only from it
 - [ ] `domain/` exists only where invariants exist; CRUD modules stay flat
 - [ ] `domain/` imports nothing outside the module; `application/` imports no I/O
-- [ ] Use cases return `Result`, never throw; actions switch exhaustively on the error tag
+- [ ] Use cases return `Result`, never throw; actions return expected errors as values; the client maps `_tag` exhaustively
 - [ ] One source of truth per shape: Drizzle for rows, zod for DTOs, inferred everywhere else
 - [ ] Server actions go through `next-safe-action` with the module's zod schema
 - [ ] No `as` casts across layer boundaries
@@ -203,3 +253,6 @@ Copy into a PR template or `ARCHITECTURE.md`.
 - [ ] Drizzle schema centralized in `lib/db/` unless a module owns its tables outright
 - [ ] Dependency direction enforced by ESLint in CI
 - [ ] Transactions opened in the use case via a port, implemented in `infra/`
+- [ ] Authorization decided in the use case (or the anemic action) via `Requester`; RLS only isolates tenants
+- [ ] Cache APIs only in `queries.ts`, revalidation only in actions, always through the tag constants
+- [ ] Cross-module calls and writes only via `index.ts` or domain events; cross-module table reads only for read models

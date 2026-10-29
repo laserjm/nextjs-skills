@@ -8,6 +8,8 @@
 | `result.ts` | `Result<T, E>`, `ok(value)`, `err(error)` |
 | `safe-action.ts` | next-safe-action client with auth middleware |
 | `env.ts` | validated env (t3-env/zod), exported as `env` |
+| `auth/requester.ts` | `Requester` type (`{ userId, tenantId, roles }`) and `getRequester()` for queries |
+| `events.ts` | generic `createEventBus(subscribers)`, `createEventCollector()`, `Subscribers` type. Knows no module; the bus is assembled in `src/server/event-subscriptions.ts` |
 | `flags.ts` | feature flags, `flags.newCheckout` |
 | `types.ts` | type-only helpers: `Prettify<T>`, `Nullable<T>` |
 

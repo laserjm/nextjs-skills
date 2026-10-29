@@ -51,7 +51,7 @@ Promote when an action contains an `if` about business state, a second action ne
 1. Move the rule into `domain/<entity>.ts` as a pure function that returns `Result` (see `.claude/rules/domain.md`).
 2. Create `application/<verb>-<noun>.ts` with `<UseCase>Deps` and a port in `application/ports.ts` (see `.claude/rules/application.md`).
 3. Move the Drizzle code into `infra/<entity>.repository.ts` implementing the port, plus a mapper if row ≠ domain type.
-4. Make the action call the use case, with a deps factory next to `actions.ts`, and switch exhaustively on `error._tag`.
+4. Make the action call the use case with a deps factory next to `actions.ts` and return its `Result`. Add the client's exhaustive `_tag` → copy map for the new errors.
 5. Add unit tests for the domain function and the use case, using an `InMemory<Noun>Repository` in `application/__fakes__/`.
 
 ## 4. Verify

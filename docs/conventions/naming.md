@@ -34,11 +34,12 @@ These apply everywhere; the layer sections only add suffixes and verbs on top.
 | --- | --- | --- |
 | Module folder | plural noun of the aggregate, `kebab-case` | `modules/orders/`, `modules/price-lists/` |
 | Layer folders | fixed names, never renamed per project | `domain/`, `application/`, `infra/` |
-| ui-layer files at module root | fixed names | `actions.ts`, `queries.ts`, `components/`, `contracts.ts`, `index.ts` |
+| ui-layer files at module root | fixed names | `actions.ts`, `queries.ts`, `subscribers.ts`, `components/`, `contracts.ts`, `index.ts` |
 | Route segment folders | `kebab-case`, plural for collections, `[param]` for dynamic | `app/orders/`, `app/orders/[orderId]/` |
 | Route groups | `(kebab-case)` describing the layout or audience | `(app)/`, `(marketing)/`, `(auth)/` |
 | Private route folders | `_kebab-case` | `_components/`, `_lib/` |
 | Cross-cutting | `lib/<concern>/` | `lib/db/`, `lib/auth/` |
+| Composition root | `server/` | `server/event-subscriptions.ts` |
 | Design-system primitives | `components/ui/` (shadcn default) | `components/ui/button.tsx` |
 
 **Rules:**
@@ -84,7 +85,12 @@ One use case per file, named as the command or query it performs.
 | Port (repository) | `ports.ts` | `<Noun>Repository`, methods as verbs | `OrderRepository.findById`, `.save`, `.nextId` |
 | Port (other I/O) | `ports.ts` | `<Capability>` noun or `<Noun>Gateway` for external systems | `Clock`, `IdGenerator`, `PaymentGateway`, `Mailer` |
 | Unit of work | `ports.ts` | `UnitOfWork` with `run(fn)` | `uow.run(async tx => …)` |
+| Event collector | `ports.ts` | `EventCollector` with `add(event)` | `deps.events.add({ _tag: 'OrderPaid', orderId })` |
+| Event handler | `on-<event>.ts` in the *receiving* module | `on<Event>(event, deps)` | `billing/application/on-order-paid.ts` → `onOrderPaid` |
+| Subscribers | `subscribers.ts` at the module root | `<module>Subscribers`, keyed by event `_tag` | `billingSubscribers = { OrderPaid: … }` |
+| Error copy map | the client component that shows the error | `<USE_CASE>_ERROR_COPY` | `PAY_ORDER_ERROR_COPY` |
 | Application error | `errors.ts` (optional) | tagged union, `PascalCase` | `NotFound`, `Forbidden` |
+| Permission policy | `<noun>-permissions.ts` | `can<Verb><Noun>(requester, entity)`, returns `boolean` | `order-permissions.ts` → `canEditOrder` |
 
 **Rules:**
 
@@ -134,6 +140,9 @@ Actions and queries are named like the use case they call, with a suffix that sa
 | Server action | `actions.ts` | `<useCase>Action` | `createOrderAction`, `shipOrderAction` |
 | Cached query (RSC) | `queries.ts` | `<verb><Noun>` matching the use case, no suffix | `getOrder(id)`, `listOpenOrders()` |
 | Cache tag | in `queries.ts` | `<noun>` or `<noun>:<id>` | `'orders'`, `` `order:${id}` `` |
+| Tag constants | `queries.ts` | `<NOUN>_TAGS` with `all` and `one(id)` | `ORDER_TAGS.one(id)` |
+| Revalidation helper | `queries.ts`, exported via `index.ts` | `revalidate<Noun>(id)` | `revalidateOrder(id)` |
+| Permission flags | computed in `queries.ts`, passed as props | `can` object, `<verb><Noun>` keys | `can.editOrder`, `can.refundPayment` |
 | Server component | `components/<noun>-<role>.tsx` | `<Noun><Role>` | `order-table.tsx` → `OrderTable` |
 | Client component | same, file starts with `'use client'` | same; no `Client` suffix | `order-form.tsx` → `OrderForm` |
 | Component props | in the component file | `<Component>Props` | `type OrderFormProps` |
@@ -169,6 +178,7 @@ A zod schema is `camelCase` + `Schema`; the type inferred from it is the same na
 | Result | `Result<T, E>`, `ok(value)`, `err(error)` | `return err({ _tag: 'OrderAlreadyPaid' })` |
 | Error union helper | `<Noun>Error` | `type OrderError = OrderAlreadyPaid \| InsufficientStock` |
 | Env | `env` object from `lib/env.ts` | `env.DATABASE_URL` |
+| Requester | `Requester` from `lib/auth/requester.ts` | `{ userId, tenantId, roles }`, field `requester` in `<UseCase>Deps` |
 
 **Rules:**
 
